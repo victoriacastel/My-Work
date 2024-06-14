@@ -1,7 +1,7 @@
 # My Work
 A compilation of various projects I have done through my studies at Miami University.
 
-## Covid-19 Dashboard
+### Covid-19 Dashboard
 An interactive app created with R Shiny and Covid-19 data from April 2020 to December 2021. Web-based version: https://victoriacastel.shinyapps.io/Project2/. Completed Fall 2023.
 
 ## Freestore Foodbank Intership Project
