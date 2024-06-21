@@ -1,0 +1,366 @@
+---
+title: "Liberty St. Location Analysis"
+author: "Victoria Castel"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r, results='hide', echo=FALSE}
+## Color palette
+ggplot() +
+  geom_point(aes(x=0, y=0), color="#e56e45") + ## orange 
+  geom_point(aes(x=0, y=1), color="#f47922") + ## orange alt
+  geom_point(aes(x=1, y=0), color="#e7a42d") + ## yellow
+  geom_point(aes(x=1, y=1), color="#ffcb16") + ## yellow alt
+  geom_point(aes(x=2, y=0), color="#66b6d9") + ## blue
+  geom_point(aes(x=3, y=0), color="#71bf44") + ## green
+  geom_point(aes(x=3, y=1), color="#4f835a") + ## green alt
+  geom_point(aes(x=4, y=0), color="#939598")   ## gray
+```
+
+
+## Loading Data / Cleanup
+```{r}
+## Packages
+library(tidyverse)
+library(ggplot2)
+library(readxl)
+library(writexl)
+library(lubridate)
+library(tidygeocoder)
+library(maps)
+library(ggthemes)
+library(tidycensus)
+options(tigris_use_cache = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE}
+## Load data
+## reading the data from excel file
+## specifying col_types because reading dates weird
+vesta_data <- read_excel("CY2022 - Vesta Client Visits.xlsx",
+                         col_types = c("numeric", "text", "text", "text", "text", "text", "date", 
+                                       "text", "text", "text", "text", "text", "numeric", "text",
+                                       "text", "text", "text", "text", "text", "text", "numeric", 
+                                       "numeric", "text", "text", "date", "date", "text", "numeric",
+                                       "numeric", "numeric", "text", "text", "text", "text", "text", 
+                                       "text", "text", "text", "text", "text", "text", "text", "text",
+                                       "text", "text", "text", "text", "text", "text", "text", "text",
+                                       "text", "text", "text", "text", "text", "text", "text", "text",
+                                       "text", "text", "text", "text", "text", "text", "text", "text",
+                                       "text", "text", "text", "text", "text", "text", "text", "text", 
+                                       "text", "text", "text", "text", "text", "text", "text", "text",
+                                       "text", "text", "text", "text", "text", "text", "text", "text",
+                                       "text", "text", "text", "text", "text", "text", "text", "text",
+                                       "text"))
+glimpse(vesta_data)
+```
+
+
+```{r}
+## Cleanup
+## NULL to NA
+vesta_df <- vesta_data   ## copy of original data
+vesta_df[] <- lapply(vesta_df, as.character) ## have to convert so it can all be done at once
+vesta_df[vesta_df == "NULL"] <- NA
+## Not requested treated as NA
+vesta_df[vesta_df == "Not requested"] <- NA
+
+## Converting 1900-01-01 DOB to NA
+vesta_df$DOB[vesta_df$DOB <= as.Date("1900-01-01")] <- NA
+
+## Shrinking the df
+vesta_df <- vesta_df %>%
+  select(ClientID, MethodOfTransportation, VeteranStatus, DOB, ServiceType, 
+         Address1, Address2, City, State, ZipCode, County, LivingSituation,
+         type, date_completed, Data___notes_588,Other_transportation_4603,
+         Other_transportation_detail_4604, Type_of_benefit_6669) %>%
+  mutate(DOB = as.Date(DOB),                        ## fixing incorrect var types 
+         date_completed = as.Date(date_completed),
+         ServiceType = recode(ServiceType, 
+                              "Food - choice pantry" = "Food/pantry",   ## Same for this purpose
+                              "Food - emergency food" = "Food/pantry"),
+         Age = trunc( (DOB %--% Sys.Date()) / years(1)))   ## Age from DOB
+
+glimpse(vesta_df)
+
+## Writing excel file to import to Power BI
+write_xlsx(vesta_df, "vesta_df.xlsx")
+```
+
+## Visualization
+### Transpostation for all clients
+```{r}
+## Transportation for all clients in 2022
+transport_summary <- data.frame(
+  table(vesta_df$MethodOfTransportation)) %>%
+  rename(MethodOfTransportation = Var1,
+         num = Freq) %>%
+  mutate(MethodOfTransportation = factor(
+           MethodOfTransportation, 
+           levels = c("Private transportation (i.e. ride sharing, taxi, friends)",
+                      "Walked (also bicycle, electric bike, scooters)",
+                      "Public transit",
+                      "Case manager"))) %>%
+  drop_na() %>%
+  mutate(percent = num / sum(num) * 100) ## percent to keep consistent with AB
+
+## Writing excel file to import to Power BI
+write_xlsx(transport_summary, "transport_summary.xlsx")
+```
+
+```{r}
+## Transportation graph
+windowsFonts(`Segoe UI` = windowsFont("Segoe UI")) # power BI font
+p.transportation <- 
+ggplot() +
+  geom_col(data=transport_summary, aes(x=MethodOfTransportation, y=percent),
+           fill="#66b6d9") +
+  geom_text(data=transport_summary, aes(x=MethodOfTransportation, y=percent, label=scales::comma(num)),
+            vjust=-0.4, family="Segoe UI") +
+  theme_minimal() +
+  scale_x_discrete(labels = c("Private transportation",
+                              "Walked",
+                              "Public transit",
+                              "Case manager")) +
+  scale_y_continuous(limits = c(0, 80),
+                     breaks = c(0, 25, 50, 75),
+                     minor_breaks = NULL,
+                     labels = c("0%", "25%", "50%", "75%")) + 
+  labs(title = "Client Transportation to Liberty St. in 2022", 
+       ## subtitle?????
+       caption = "Source: Vesta Client Data") +
+  theme(text = element_text(family="Segoe UI"),
+        plot.caption = element_text(family="mono", color="grey40"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text = element_text(size=12))
+p.transportation
+```
+
+### Client address map
+```{r}
+## Data handling
+## Merging columns into a single address column
+longLat_df00 <- vesta_df %>%
+  unite(col=cityState, c(City, State), sep=", ") %>% ## need comma between only here
+  unite(col=Address, c(Address1, cityState, ZipCode), sep=" ") %>% ## combining the rest
+  filter(Address != "NA 1, NA NA") ## one weird entry
+  
+## Note: not including Address2
+##  not everyone has an address 2 
+##  gives the same long/lat from the building number
+
+## Removing NA rows
+longLat_df00$Address[longLat_df00$Address == "NA NA, NA NA"] <- NA
+longLat_df01 <- longLat_df00 %>%
+  select(Address) %>%  ## for simplicity
+  drop_na()
+```
+```{r}
+## Using tidygeocoder to extract long/lat
+longLat_df <- longLat_df01 %>%
+  geocode(address = Address, method="osm", lat=lat, long=long)
+## BACKUP SAVE OF LONG/LAT
+##  line is commented to ensure it stays saved
+# backup_longLat <- longLat_df
+```
+```{r, message=FALSE}
+## Only long/lat of Hamilton county
+hamilton_longLat <- longLat_df %>%
+  filter(long >= -84.9, long <= -84.2,
+         lat >= 39, lat <= 39.35)
+## saving file
+write_xlsx(hamilton_longLat, "hamilton_longLat.xlsx")
+
+
+## Looking at just Hamilton County
+## Shape data using tidycensus
+hamilton_shape <- get_acs(
+  geography = "tract", 
+  variables = "B19013_001",
+  state = "OH", 
+  county = "Hamilton",
+  geometry = TRUE )
+
+# Long and lat of new location
+new_address <- data.frame(Address = "3401 Rosenthal Way Cincinnati, OH 45204")
+new_location <- new_address %>%
+  geocode(address = Address, method="osm", lat=lat, long=long)
+## Long and lat of Liberty Street
+liberty_address <- data.frame(Address = "112 E Liberty St, Cincinnati, OH 45202")
+liberty_location <- liberty_address %>%
+  geocode(address = Address, method="osm", lat=lat, long=long)
+
+## Color dots for transportation
+longLat_transport <- merge(longLat_df, longLat_df00, 
+                           by.x = "Address", by.y = "Address") %>%
+  filter(long >= -84.9, long <= -84.2,
+         lat >= 39, lat <= 39.35) %>%
+  select(Address, long, lat, MethodOfTransportation) %>%
+  drop_na() %>% ## won't be graphed anyway
+  unique()
+```
+
+```{r}
+## Maps!!
+## Just the locations labeled
+windowsFonts(`Segoe UI` = windowsFont("Segoe UI")) # power BI font
+p.new_liberty <- 
+ggplot() +  
+  geom_sf(data=hamilton_shape, color="grey40", fill="grey95") +
+  #geom_point(data=longLat_transport, aes(x=long, y=lat, color=MethodOfTransportation), alpha=0.5, size=1) + 
+  geom_point(data=hamilton_longLat, aes(x=long, y=lat), alpha=0.1, size=1) +
+  geom_point(data=new_location, aes(x=long, y=lat), color="#71bf44", size=2) +
+  geom_point(data=liberty_location, aes(x=long, y=lat), color="#71bf44", size=2) +
+  coord_sf() +
+  theme_map() +
+  theme(text = element_text(family="Segoe UI"),
+        legend.key.width = unit(2.25, "cm"),
+        legend.position = "right",
+        title = element_text(size=16)) +
+  # labs(title = "Client address by census tract in Hamilton County",
+  #      subtitle = "The Liberty Street address and new building location are highlighted") +
+  annotate("text", x=-84.65, y=39.03, label="New Location",
+           color="#71bf44", family="Segoe UI", size=7) +
+  annotate("text", x=-84.45, y=39.03, label="Liberty St.",
+           color="#71bf44", family="Segoe UI", size=7) +
+  annotate("segment", x=-84.65, xend=-84.59, y=39.04, yend=39.078,   ## new location
+         color="#71bf44", size=0.8, arrow=arrow(length=unit(0.3, "cm"))) +
+  annotate("segment", x=-84.45, xend=-84.505, y=39.04, yend=39.103,
+           color="#71bf44", size=0.8, arrow=arrow(length=unit(0.3, "cm")))   ## liberty street
+p.new_liberty
+```
+```{r}
+## New approach
+## Two map graphs: group boxes and new location labels
+windowsFonts(`Segoe UI` = windowsFont("Segoe UI")) # power BI font
+p.boxes_map <- 
+ggplot() +  
+  geom_sf(data=hamilton_shape, color="grey40", fill="grey95") +
+  #geom_point(data=longLat_transport, aes(x=long, y=lat, color=MethodOfTransportation), alpha=0.5, size=1) + 
+  geom_point(data=hamilton_longLat, aes(x=long, y=lat), alpha=0.1, size=1) +
+  geom_point(data=new_location, aes(x=long, y=lat), color="#71bf44", size=2) +
+  geom_point(data=liberty_location, aes(x=long, y=lat), color="#71bf44", size=2) +
+  coord_sf() +
+  theme_map() +
+  theme(text = element_text(family="Segoe UI"),
+        legend.key.width = unit(2.25, "cm"),
+        legend.position = "right",
+        title = element_text(size=16)) +
+  # labs(title = "Client address by census tract in Hamilton County",
+  #      subtitle = "The boxes are of equal area") +
+  annotate("rect", xmin=-84.62, xmax=-84.542, ymin=39.1, ymax=39.16, ## left box .078
+           alpha=0, color="#e56e45", linewidth=1) +   ## change color
+  annotate("rect", xmin=-84.538, xmax=-84.46, ymin=39.1, ymax=39.16,  ## right box 0.08
+           alpha=0, color="#e7a42d", linewidth=1) +
+  annotate("text", x=-84.76, y=39.09, label="Group A\nn = 1846", 
+           color="#e56e45", family="Segoe UI", size=6) +   ## left label
+  annotate("text", x=-84.44, y=39.01, label="Group B\nn = 2181", 
+           color="#e7a42d", family="Segoe UI", size=6) +   ## right label
+  annotate("segment", x=-84.71, xend=-84.63, y=39.09, yend=39.11,
+           color="#e56e45", size=0.8, arrow=arrow(length=unit(0.3, "cm"))) + ## right arrow
+  annotate("segment", x=-84.44, xend=-84.47, y=39.03, yend=39.095,
+           color="#e7a42d", size=0.8, arrow=arrow(length=unit(0.3, "cm")))  ## left arrow
+p.boxes_map
+```
+
+### Transportation groups
+```{r}
+## Of those in the boxes, how many of them walk vs drive
+## Left box
+left_box_hamilton <- longLat_transport %>%
+  filter(long >= -84.62, long <= -84.542,   ## correct long/lat range
+         lat >= 39.1, lat <= 39.16) %>%
+  mutate(total = n()) %>%  ## need two because of the grouping statement
+  group_by(MethodOfTransportation) %>%
+  mutate(num = n(),   ## in groups
+         Percent = n() / total * 100,
+         group = "Group A",
+         Box = "Left") %>%    ## box label
+  select(Box, group, MethodOfTransportation, num, Percent, total) %>%
+  unique()
+## Right box
+right_box_hamilton <- longLat_transport %>%
+  filter(long >= -84.54, long <= -84.46,   ## correct long/lat range
+         lat >= 39.1, lat <= 39.16) %>%
+  mutate(total = n()) %>%  ## need two because of the grouping statement
+  group_by(MethodOfTransportation) %>%
+  mutate(num = n(),  ## counts in groups now
+         Percent = num / total * 100,
+         group = "Group B",
+         Box = "Right") %>%
+  select(Box, group, MethodOfTransportation, num, Percent, total) %>%
+  unique()
+## Combining box dfs
+boxes_hamilton <- bind_rows(
+  left_box_hamilton, right_box_hamilton) %>%
+  mutate(MethodOfTransportation = 
+           factor(MethodOfTransportation,
+                  levels = c("Private transportation (i.e. ride sharing, taxi, friends)",
+                             "Walked (also bicycle, electric bike, scooters)",
+                             "Public transit",
+                             "Case manager")))  
+## excel file for power bi
+write_xlsx(boxes_hamilton, "boxes_hamilton.xlsx")
+```
+
+```{r}
+## Creating some sort of table to compare right vs left box transportation
+## Using facet wrapping and percents
+##  different n(), more comparable
+windowsFonts(`Segoe UI` = windowsFont("Segoe UI")) # power BI font
+p.AB_transport <-
+ggplot(data=boxes_hamilton) +
+  geom_col(aes(x=MethodOfTransportation, y=Percent, fill=group)) +
+  facet_wrap(~group) +
+  geom_text(aes(x=MethodOfTransportation, y=Percent, label=scales::comma(num)),
+            vjust=-0.4, family="Segoe UI") +
+  theme_minimal() +
+  scale_x_discrete(labels = c("Private\ntransportation", "Walked", 
+                              "Public\ntransit", "Case Manager")) +
+  scale_y_continuous(limits = c(0, 80),
+                     breaks = c(0, 25, 50, 75),
+                     minor_breaks = NULL,
+                     labels = c("0%", "25%", "50%", "75%")) +
+  labs(title = "Group A vs group B method of transportation",
+       caption = "Source: Vesta Client Data") +
+  theme(text = element_text(family="Segoe UI"),
+        plot.caption = element_text(family="mono", color="grey40"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.position = "none",
+        axis.text = element_text(size=12),  ## increase axis label size
+        strip.text.x = element_text(size=14)) +  ## increase facet label size
+  scale_fill_manual(values = c("#e56e45", "#e7a42d"))
+p.AB_transport
+```
+### All maps / graphs
+```{r}
+p.transportation
+p.new_liberty
+p.boxes_map
+p.AB_transport
+
+## Saving maps for Power BI
+ggsave("p.new_liberty.png", 
+       plot = p.new_liberty, 
+       dpi = 1000, bg = "white",
+       height=7, width=10)
+ggsave("p.boxes_map.png", 
+       plot = p.boxes_map, 
+       dpi = 1000, bg = "white", 
+       height=7, width=10)
+
+```
+
+
+## Shape data from tidycensus to topojason
+```{r, warning=FALSE, message=FALSE}
+hamilton_shape %>%
+  st_cast("POLYGON") %>% 
+  geojsonio::topojson_json(object_name = "hamilton_geometry", crs = 4326) %>% 
+  write("hamilton_geometry.topojson")
+
+```
+
