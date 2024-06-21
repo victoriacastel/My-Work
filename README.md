@@ -9,3 +9,5 @@ A static dashboard that helped management decide whether or not to change the lo
 
 ## SAS Macro
 A macro about the frequency of police calls by day of the week and year. A Word document is output, showing the frequency of the user-specified crime by the day of the week, across the years in the dataset. Note the data used is too large to upload, but I am more than happy to provide it upon request! Completed Fall 2023.
+
+
